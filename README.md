@@ -15,6 +15,8 @@ Made as a love letter to Bluemoon Interactive and everyone who spent the
 90s bunny-hopping down neon roads in space. All game content is theirs;
 SkyRoads was released as freeware.
 
+Original source: https://github.com/ammaarreshi/skyroads-port
+
 ## How faithful is it?
 
 This is not a remake "in the spirit of" the original — it aims to be the
