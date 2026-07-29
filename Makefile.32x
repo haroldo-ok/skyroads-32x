@@ -1,0 +1,147 @@
+# SkyRoads for Sega 32X
+# Toolchain: Chilly Willy's Sega devkit (32XDK 20220418, GCC 12.1)
+
+GENDEV ?= /opt/toolchains/sega
+BUILD  := build32x
+OUT    := release/SkyRoads32X.32x
+VGMZIP := release/SkyRoads32X-vgm.zip
+SRCZIP := release/SkyRoads32X-source.zip
+P32    := src/platform/32x
+GEN    := $(P32)/generated/32x
+
+SHCC   := $(GENDEV)/sh-elf/bin/sh-elf-gcc
+SHAS   := $(GENDEV)/sh-elf/bin/sh-elf-as
+SHOBJC := $(GENDEV)/sh-elf/bin/sh-elf-objcopy
+SHNM   := $(GENDEV)/sh-elf/bin/sh-elf-nm
+SHSIZE := $(GENDEV)/sh-elf/bin/sh-elf-size
+MDCC   := $(GENDEV)/m68k-elf/bin/m68k-elf-gcc
+MDOBJC := $(GENDEV)/m68k-elf/bin/m68k-elf-objcopy
+HOSTCC ?= cc
+
+SHFLAGS := -m2 -mb -std=c11 -Os -fomit-frame-pointer -ffunction-sections \
+           -fdata-sections -flto -fuse-linker-plugin -Wall -Wextra \
+           -Wno-unused-parameter -D__32X__ -DSR_32X -DSR_BIG_ENDIAN \
+           -Isrc/core -I$(P32) -I$(GEN)
+SHLDFLAGS := -T $(P32)/mars.ld -nostdlib \
+             -Wl,-Map=$(BUILD)/SkyRoads32X.map -Os -flto -fuse-linker-plugin
+# The slave SH-2 must synthesize one sample every 1/22050 second.
+SHAUDIOFLAGS := -m2 -mb -std=c11 -O2 -fomit-frame-pointer -Wall -Wextra \
+                -Wno-unused-parameter -D__32X__ -DSR_32X -DSR_BIG_ENDIAN \
+                -Isrc/core -I$(P32) -I$(GEN)
+SHLIBS := -L$(GENDEV)/sh-elf/sh-elf/lib \
+          -L$(GENDEV)/sh-elf/lib/gcc/sh-elf/12.1.0 -lc -lgcc -lnosys
+
+MDFLAGS := -m68000 -std=c11 -Os -fomit-frame-pointer -ffunction-sections \
+           -fdata-sections -Wa,--register-prefix-optional -I$(P32)/md_src
+MDLDFLAGS := -T $(P32)/md_src/md.ld -nostdlib
+MDLIBS := -L$(GENDEV)/m68k-elf/lib/gcc/m68k-elf/12.1.0 -lgcc
+
+CORE_OBJS := \
+  $(BUILD)/game.o $(BUILD)/gfx.o $(BUILD)/play.o $(BUILD)/render.o \
+  $(BUILD)/tables.o $(BUILD)/hud.o $(BUILD)/text.o
+PLAT_OBJS := \
+  $(BUILD)/assets_32x.o $(BUILD)/cfg_32x.o $(BUILD)/hw_32x.o \
+  $(BUILD)/audio_32x.o $(BUILD)/main_32x.o \
+  $(BUILD)/assets_data_32x.o $(BUILD)/assets_blob_32x.o
+SHOBJS := $(BUILD)/mars_start.o $(CORE_OBJS) $(PLAT_OBJS)
+MDOBJS := $(BUILD)/md_start.o $(BUILD)/md_main.o $(BUILD)/md_vgm.o \
+  $(BUILD)/md_vgm_data.o $(BUILD)/md_vgm_blob.o $(BUILD)/md_font.o
+
+DATA_FILES := ANIM.LZS CARS.LZS DASHBRD.LZS DEMO.REC FUL_DISP.DAT \
+  GOMENU.LZS HELPMENU.LZS INTRO.LZS INTRO.SND MAINMENU.LZS MUZAX.LZS \
+  OXY_DISP.DAT ROADS.LZS SETMENU.LZS SFX.SND SPEED.DAT TREKDAT.LZS \
+  WORLD0.LZS WORLD1.LZS WORLD2.LZS WORLD3.LZS WORLD4.LZS \
+  WORLD5.LZS WORLD6.LZS WORLD7.LZS WORLD8.LZS WORLD9.LZS
+
+.PHONY: all release source-package clean check tools
+all: release
+release: $(OUT) $(VGMZIP) check source-package
+
+source-package:
+	python3 tools/package_source.py . $(SRCZIP)
+
+$(BUILD):
+	mkdir -p $@
+
+$(GEN)/.stamp: tools/build_32x_assets.py tools/opl2_to_vgm.py tools/lzs.py $(DATA_FILES)
+	python3 tools/build_32x_assets.py . $(GEN)
+	touch $@
+
+# 68000 resident controller/vblank service
+$(BUILD)/md_start.o: $(P32)/md_src/md_start.s $(P32)/md_src/common.h | $(BUILD)
+	$(MDCC) $(MDFLAGS) -x assembler-with-cpp -c $< -o $@
+$(BUILD)/md_font.o: $(P32)/md_src/font.s | $(BUILD)
+	$(MDCC) $(MDFLAGS) -x assembler-with-cpp -c $< -o $@
+$(BUILD)/md_main.o: $(P32)/md_src/md_main.c $(P32)/md_src/common.h | $(BUILD)
+	$(MDCC) $(MDFLAGS) -c $< -o $@
+$(BUILD)/md_vgm.o: $(P32)/md_src/md_vgm.c $(P32)/md_src/common.h $(GEN)/.stamp | $(BUILD)
+	$(MDCC) $(MDFLAGS) -c $< -o $@
+$(BUILD)/md_vgm_data.o: $(GEN)/vgm_data_68k.c $(GEN)/vgm_data_68k.h $(GEN)/.stamp | $(BUILD)
+	$(MDCC) $(MDFLAGS) -c $< -o $@
+$(BUILD)/md_vgm_blob.o: $(GEN)/vgm_blob_68k.s $(GEN)/vgm_blob_68k.bin $(GEN)/.stamp | $(BUILD)
+	$(MDCC) $(MDFLAGS) -x assembler-with-cpp -c $< -o $@
+$(BUILD)/md_start.elf: $(MDOBJS)
+	$(MDCC) $(MDLDFLAGS) $^ -o $@ $(MDLIBS)
+$(BUILD)/md_start.bin: $(BUILD)/md_start.elf
+	$(MDOBJC) -O binary $< $@
+
+# SH-2 startup/header and predecoded ROM blob
+$(BUILD)/mars_start.o: $(P32)/mars_start.s $(BUILD)/md_start.bin | $(BUILD)
+	$(SHAS) --small $< -o $@
+$(BUILD)/assets_blob_32x.o: $(GEN)/assets_blob_32x.s $(GEN)/.stamp | $(BUILD)
+	$(SHAS) --small $< -o $@
+$(BUILD)/assets_data_32x.o: $(GEN)/assets_data_32x.c $(GEN)/.stamp | $(BUILD)
+	$(SHCC) $(SHFLAGS) -c $< -o $@
+
+# Portable engine core
+$(BUILD)/game.o: src/core/game.c | $(BUILD)
+	$(SHCC) $(SHFLAGS) -c $< -o $@
+$(BUILD)/gfx.o: src/core/gfx.c | $(BUILD)
+	$(SHCC) $(SHFLAGS) -c $< -o $@
+$(BUILD)/play.o: src/core/play.c | $(BUILD)
+	$(SHCC) $(SHFLAGS) -c $< -o $@
+$(BUILD)/render.o: src/core/render.c $(GEN)/.stamp | $(BUILD)
+	$(SHCC) $(SHFLAGS) -c $< -o $@
+$(BUILD)/tables.o: src/core/tables.c | $(BUILD)
+	$(SHCC) $(SHFLAGS) -c $< -o $@
+$(BUILD)/hud.o: src/core/hud.c | $(BUILD)
+	$(SHCC) $(SHFLAGS) -c $< -o $@
+$(BUILD)/text.o: src/core/text.c | $(BUILD)
+	$(SHCC) $(SHFLAGS) -c $< -o $@
+
+# 32X platform layer
+$(BUILD)/assets_32x.o: $(P32)/assets_32x.c $(GEN)/.stamp | $(BUILD)
+	$(SHCC) $(SHFLAGS) -c $< -o $@
+$(BUILD)/cfg_32x.o: $(P32)/cfg_32x.c | $(BUILD)
+	$(SHCC) $(SHFLAGS) -c $< -o $@
+$(BUILD)/hw_32x.o: $(P32)/hw_32x.c | $(BUILD)
+	$(SHCC) $(SHFLAGS) -c $< -o $@
+$(BUILD)/audio_32x.o: $(P32)/audio_32x.c $(GEN)/.stamp | $(BUILD)
+	$(SHCC) $(SHAUDIOFLAGS) -c $< -o $@
+$(BUILD)/main_32x.o: $(P32)/main_32x.c | $(BUILD)
+	$(SHCC) $(SHFLAGS) -c $< -o $@
+
+$(BUILD)/SkyRoads32X.elf: $(SHOBJS)
+	$(SHCC) $(SHLDFLAGS) $^ -o $@ $(SHLIBS)
+	$(SHSIZE) $@
+	$(SHNM) -n $@ > $(BUILD)/SkyRoads32X.sym
+
+$(BUILD)/romheaderfix: tools/romheaderfix.c | $(BUILD)
+	$(HOSTCC) -O2 $< -o $@
+
+$(OUT): $(BUILD)/SkyRoads32X.elf $(BUILD)/romheaderfix | $(BUILD)
+	mkdir -p $(dir $@)
+	$(SHOBJC) -O binary $< $(BUILD)/SkyRoads32X.raw
+	dd if=$(BUILD)/SkyRoads32X.raw of=$@ bs=8192 conv=sync status=none
+	$(BUILD)/romheaderfix "SEGA 32X" "SKYROADS 32X PORT" $@
+
+$(VGMZIP): tools/package_vgm.py $(GEN)/.stamp
+	python3 tools/package_vgm.py $(GEN)/vgm $@
+
+check: $(OUT)
+	python3 tests/verify_rom.py $(OUT) $(BUILD)/SkyRoads32X.elf
+	python3 tests/test_vgm_conversion.py
+	python3 tests/test_pwm_sfx.py
+
+clean:
+	rm -rf $(BUILD) release
