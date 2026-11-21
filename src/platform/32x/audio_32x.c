@@ -10,6 +10,12 @@
 #define PWM_SAMPLE_MAX 1032
 #define PWM_SAMPLE_CENTER 515
 
+/* Busy-wait iterations between PWM writes.  The slave runs at 23 MHz and must
+ * emit one sample per PWM frame (SR32_PWM_RATE), so the frame budget is
+ * 23 MHz / 22050 = 1043 cycles.  The loop below compiles to five instructions
+ * (~6 cycles), hence ~170 iterations. */
+#define PWM_WRITE_PACE 170
+
 typedef struct {
     bool enabled;
     const uint8_t *pcm;
@@ -163,10 +169,12 @@ void sr32_audio_slave_main(void)
 
     for (;;) {
         poll_command();
-        while ((MARS_PWM_LEFT & 0x8000) ||
-               (MARS_PWM_RIGHT & 0x8000)) {
-            poll_command();
-        }
+        /* Pace the write instead of blocking on the FIFO full flags.  Those
+         * flags can stay asserted indefinitely, which stalled this loop after
+         * a handful of frames and cut every effect down to its first few
+         * samples -- audible as a click rather than the sample playing out. */
+        for (volatile uint32_t d = 0; d < PWM_WRITE_PACE; d++) {}
+        poll_command();
         uint16_t sample = to_pwm(render_sample());
         MARS_PWM_LEFT = sample;
         MARS_PWM_RIGHT = sample;

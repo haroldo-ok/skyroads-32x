@@ -36,6 +36,15 @@ def main() -> int:
         assert re.search(r"const sr32_pcm_asset sr32_intro_pcm\s*=.*0x5a, 256}",
                          text, re.S), "intro PCM must remain at unity gain"
 
+    # The slave must pace its PWM writes with a bounded wait.  Blocking on the
+    # FIFO full flags alone wedged the streaming loop after a handful of
+    # frames, so every effect played as a click instead of its full sample.
+    slave = (ROOT / "src/platform/32x/audio_32x.c").read_text()
+    loop = slave.rsplit("for (;;)", 1)[1]
+    assert "while ((MARS_PWM_LEFT & 0x8000)" not in loop, \
+        "PWM streaming loop must not block indefinitely on the FIFO full flags"
+    assert "PWM_WRITE_PACE" in slave, "PWM write pacing constant is missing"
+
     print("PWM SFX normalization OK: gains " +
           ", ".join(f"{gain}/256x" for gain in expected_gains))
     return 0

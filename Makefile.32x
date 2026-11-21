@@ -67,6 +67,15 @@ $(GEN)/.stamp: tools/build_32x_assets.py tools/opl2_to_vgm.py tools/lzs.py $(DAT
 	python3 tools/build_32x_assets.py . $(GEN)
 	touch $@
 
+# The generated .c/.s/.bin files above are produced by the .stamp recipe, not
+# by rules of their own.  Listing them as prerequisites of .stamp (order-only,
+# so they never trigger it) teaches make where they come from, otherwise a
+# parallel `make -j` on a fresh tree races the recipe and fails with
+# "No rule to make target .../vgm_data_68k.c".
+$(GEN)/vgm_data_68k.c $(GEN)/vgm_data_68k.h $(GEN)/vgm_blob_68k.s \
+$(GEN)/vgm_blob_68k.bin $(GEN)/assets_blob_32x.s $(GEN)/assets_data_32x.c \
+$(GEN)/assets_data_32x.h: | $(GEN)/.stamp
+
 # 68000 resident controller/vblank service
 $(BUILD)/md_start.o: $(P32)/md_src/md_start.s $(P32)/md_src/common.h | $(BUILD)
 	$(MDCC) $(MDFLAGS) -x assembler-with-cpp -c $< -o $@
@@ -76,9 +85,9 @@ $(BUILD)/md_main.o: $(P32)/md_src/md_main.c $(P32)/md_src/common.h | $(BUILD)
 	$(MDCC) $(MDFLAGS) -c $< -o $@
 $(BUILD)/md_vgm.o: $(P32)/md_src/md_vgm.c $(P32)/md_src/common.h $(GEN)/.stamp | $(BUILD)
 	$(MDCC) $(MDFLAGS) -c $< -o $@
-$(BUILD)/md_vgm_data.o: $(GEN)/vgm_data_68k.c $(GEN)/vgm_data_68k.h $(GEN)/.stamp | $(BUILD)
+$(BUILD)/md_vgm_data.o: $(GEN)/vgm_data_68k.c $(GEN)/vgm_data_68k.h | $(BUILD)
 	$(MDCC) $(MDFLAGS) -c $< -o $@
-$(BUILD)/md_vgm_blob.o: $(GEN)/vgm_blob_68k.s $(GEN)/vgm_blob_68k.bin $(GEN)/.stamp | $(BUILD)
+$(BUILD)/md_vgm_blob.o: $(GEN)/vgm_blob_68k.s $(GEN)/vgm_blob_68k.bin | $(BUILD)
 	$(MDCC) $(MDFLAGS) -x assembler-with-cpp -c $< -o $@
 $(BUILD)/md_start.elf: $(MDOBJS)
 	$(MDCC) $(MDLDFLAGS) $^ -o $@ $(MDLIBS)
@@ -88,9 +97,9 @@ $(BUILD)/md_start.bin: $(BUILD)/md_start.elf
 # SH-2 startup/header and predecoded ROM blob
 $(BUILD)/mars_start.o: $(P32)/mars_start.s $(BUILD)/md_start.bin | $(BUILD)
 	$(SHAS) --small $< -o $@
-$(BUILD)/assets_blob_32x.o: $(GEN)/assets_blob_32x.s $(GEN)/.stamp | $(BUILD)
+$(BUILD)/assets_blob_32x.o: $(GEN)/assets_blob_32x.s | $(BUILD)
 	$(SHAS) --small $< -o $@
-$(BUILD)/assets_data_32x.o: $(GEN)/assets_data_32x.c $(GEN)/.stamp | $(BUILD)
+$(BUILD)/assets_data_32x.o: $(GEN)/assets_data_32x.c | $(BUILD)
 	$(SHCC) $(SHFLAGS) -c $< -o $@
 
 # Portable engine core

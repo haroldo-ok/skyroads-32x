@@ -15,6 +15,8 @@ Made as a love letter to Bluemoon Interactive and everyone who spent the
 90s bunny-hopping down neon roads in space. All game content is theirs;
 SkyRoads was released as freeware.
 
+Original source: https://github.com/ammaarreshi/skyroads-port
+
 ## How faithful is it?
 
 This is not a remake "in the spirit of" the original — it aims to be the
@@ -50,17 +52,117 @@ cmake -B build -S . && cmake --build build
 Web, iOS (including TestFlight), and Windows cross-builds:
 see [docs/PORTING.md](docs/PORTING.md).
 
+### Sega 32X toolchain
+
+The 32X build needs a cross-compiler for both CPUs — SH-2 (the main processors)
+and M68k (the sound-side 68000):
+
+```sh
+# Chilly Willy's Sega devkit, release 20220418 (GCC 12.1.0)
+curl -LO https://github.com/viciious/32XDK/releases/download/20220418/chillys-sega-devkit-20220418-opt.tar.zst
+
+mkdir -p /opt/toolchains
+tar --zstd -xf chillys-sega-devkit-20220418-opt.tar.zst -C /opt/toolchains
+# the archive unpacks to opt/toolchains/sega; move it into place
+mv /opt/toolchains/opt/toolchains/sega /opt/toolchains/sega
+```
+
+`--zstd` needs the `zstd` package (Debian/Ubuntu: `sudo apt install zstd`).
+If you cannot write to `/opt`, extract anywhere and point the build at it with
+`GENDEV`:
+
+```sh
+make -f Makefile.32x -j GENDEV=$HOME/toolchains/sega release
+```
+
+Verify both compilers before building:
+
+```sh
+/opt/toolchains/sega/sh-elf/bin/sh-elf-gcc --version    # GCC 12.1.0
+/opt/toolchains/sega/m68k-elf/bin/m68k-elf-gcc --version # GCC 12.1.0
+```
+
 ### Sega 32X
 
 The 32X cartridge build, controller map, memory design and headless PicoDrive
 point-to-point tests are documented in [docs/32X.md](docs/32X.md). The ROM is
-built with `make -f Makefile.32x release` and written to
-`release/SkyRoads32X.32x`. Its OPL2 scores are converted at build time to
-standard Genesis VGM and played on the console's real Yamaha YM2612; the 14
-converted tracks are also packaged as `release/SkyRoads32X-vgm.zip`.
+built with `make -f Makefile.32x -j release` and written to
+`release/SkyRoads32X.32x`.
 
 Controls: arrows steer/throttle, Space jumps, Esc back, P pause — same as
 DOS. Touch (iOS): d-pad lower-left, jump button lower-right.
+
+#### Testing the 32X build
+
+`make -f Makefile.32x release` runs these as part of the build:
+
+| Suite | Coverage |
+|---|---|
+| `tests/verify_rom.py` | Genesis/MARS headers, checksum, SH-2 entry points, ELF sections, SDRAM/stack bounds |
+| `tests/test_vgm_conversion.py` | Rebuilds all 14 tracks: pitch accuracy, slot map, carrier levels, loop/end, generated-file freshness, ROM size budget |
+| `tests/test_pwm_sfx.py` | PWM sound-effect normalization |
+| `tests/run_emulator_tests.py` | Boots the real ROM in PicoDrive and checks rendered frames + audio |
+
+The emulator suite is the end-to-end one: it drives the cartridge from the
+intro through the menus into gameplay, and verifies both the music and the
+landing sound effect in the audio output. See [docs/32X.md](docs/32X.md) for
+how to build the PicoDrive core it needs.
+
+#### Music on the 32X
+
+The 32X has a real Yamaha YM2612 and an SN76489, but the original soundtrack is
+a DOS OPL2 score. At build time
+[`tools/opl2_to_vgm.py`](tools/opl2_to_vgm.py) converts all fourteen MUZAX
+songs into standard Genesis VGM files, which the 68000 resident player
+([`md_vgm.c`](src/platform/32x/md_src/md_vgm.c)) streams to the actual sound
+chips. Nothing is sampled and no emulation runs on the console — the hardware
+plays it. The converted tracks also ship as `release/SkyRoads32X-vgm.zip` and
+play in any VGM player.
+
+Two details drive the design:
+
+- **All six FM channels stay melodic.** The 32X's YM2612 channels are reserved
+  for the OPL2's melodic voices, so all five OPL rhythm voices are
+  resynthesised on the SN76489 — three tone generators plus its noise channel,
+  with measured per-drum envelopes and noise colours taken from the DOS
+  renders rather than guessed.
+- **The music leaves headroom.** Music comes out of the YM2612/SN76489 and
+  effects come out of the separate PWM DAC, so the two are summed by the
+  hardware, not by software. The music is still deliberately attenuated
+  (`YM_MUSIC_TL_BIAS`) so it cannot sit on top of the effects. That constant is
+  pinned by `tests/test_vgm_conversion.py`.
+
+The whole blob has to fit the 68000's fixed 512 KiB ROM window alongside
+startup code and the Work RAM image, so the converter emits compact streams
+and `tests/test_vgm_conversion.py` enforces the budget (currently 408,240 of
+458,752 bytes). The suite also rebuilds every track and checks pitch accuracy
+(within 3 cents over notes 0–87), the YM channel/slot mapping, carrier levels,
+loop and end commands, and that the checked-in generated assets are fresh.
+
+#### Sound effects on the 32X
+
+The five DOS sound effects and the intro's digitized voice are original PCM
+data, and they are played back rather than emulated: [`audio_32x.c`](src/platform/32x/audio_32x.c)
+runs on the slave SH-2, which streams `SFX.SND` and `INTRO.SND` bytes over the
+32X's PWM DAC while the 68000 keeps feeding the FM chips. The two processors are
+independent, so an effect never interrupts the music.
+
+`SFX.SND` records its five effects at wildly different levels, so
+`tools/build_32x_assets.py` normalizes each one with a per-effect `gain_q8` to a
+common 480-count PWM peak. The intro stays at unity. `tests/test_pwm_sfx.py`
+pins those gains and the resulting peak.
+
+**Pacing is the subtle part.** The slave loop must emit one sample per PWM
+frame — 22050 Hz — so each sample gets 1043 SH-2 cycles (23 MHz / 22050). It
+paces with `PWM_WRITE_PACE` rather than blocking on the PWM FIFO full flags.
+Those flags can stay asserted indefinitely, and waiting on them wedged the
+streaming loop after a handful of frames: every effect played only its first
+few bytes and came out as a click instead of the full sample. `test_pwm_sfx.py`
+asserts the loop never blocks on those flags, so the regression cannot return.
+
+Measured in PicoDrive, the landing effect peaks about **10x above its own
+music floor** and runs about 0.96 s (the 0.644 s source sample plus the bounce
+retrigger).
 
 ## Make your own tracks
 
@@ -80,7 +182,8 @@ surfaces, fuel pickups, per-road palettes are all yours to edit.
 - `src/core/` — platform-independent engine core (C11, no OS calls)
 - `src/platform/` — SDL2 shell (desktop/web/iOS), iOS bundle bits
 - `src/tools/` — headless render/demo/music test harnesses
-- `tools/` — Python: format extractor, LZS codec, track builder
+- `tools/` — Python: format extractor, LZS codec, track builder,
+  OPL2→YM2612 VGM converter (`opl2_to_vgm.py`), 32X asset packager
 - `docs/` — format specs and porting guide
 - `re/` — function map and per-subsystem reverse-engineering notes
 
